@@ -1,0 +1,119 @@
+syntax = "proto3";
+
+// Public gRPC API of pmcd. Semantics match the memcached text protocol; any node of the
+// cluster accepts any key and forwards to the shard leader.
+package pmc.v1;
+
+service Memcache {
+  // Multi-key get. Only hits are returned, in request order.
+  rpc Get(GetRequest) returns (GetResponse);
+  // set / add / replace / append / prepend, optionally with compare-and-swap.
+  rpc Set(SetRequest) returns (SetResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  rpc Incr(ArithRequest) returns (ArithResponse);
+  rpc Decr(ArithRequest) returns (ArithResponse);
+  rpc Touch(TouchRequest) returns (TouchResponse);
+  rpc FlushAll(FlushAllRequest) returns (FlushAllResponse);
+  rpc Stats(StatsRequest) returns (StatsResponse);
+}
+
+message Item {
+  bytes key = 1;
+  bytes value = 2;
+  uint32 flags = 3;
+  uint64 cas = 4;
+  // Remaining TTL in seconds; -1 means "never expires".
+  int64 ttl = 5;
+}
+
+message GetRequest {
+  repeated bytes keys = 1;
+  // If set, also updates the TTL of every hit (memcached `gat`).
+  optional int64 touch_exptime = 2;
+}
+
+message GetResponse {
+  repeated Item items = 1;
+}
+
+enum StoreMode {
+  SET = 0;
+  ADD = 1;
+  REPLACE = 2;
+  APPEND = 3;
+  PREPEND = 4;
+}
+
+enum StoreStatus {
+  STORED = 0;
+  NOT_STORED = 1;
+  // CAS mismatch.
+  EXISTS = 2;
+  NOT_FOUND = 3;
+}
+
+message SetRequest {
+  bytes key = 1;
+  bytes value = 2;
+  uint32 flags = 3;
+  // memcached exptime: 0 = never, <= 30 days = relative seconds, otherwise unix time.
+  int64 exptime = 4;
+  StoreMode mode = 5;
+  optional uint64 cas = 6;
+}
+
+message SetResponse {
+  StoreStatus status = 1;
+  // CAS of the stored item (0 unless STORED).
+  uint64 cas = 2;
+}
+
+enum DeleteStatus {
+  DELETED = 0;
+  DELETE_NOT_FOUND = 1;
+  DELETE_EXISTS = 2;
+}
+
+message DeleteRequest {
+  bytes key = 1;
+  optional uint64 cas = 2;
+}
+
+message DeleteResponse {
+  DeleteStatus status = 1;
+}
+
+message ArithRequest {
+  bytes key = 1;
+  uint64 delta = 2;
+  // Create the item with this value on miss (memcached meta `ma N J`).
+  optional uint64 initial = 3;
+  int64 initial_exptime = 4;
+}
+
+message ArithResponse {
+  bool found = 1;
+  uint64 value = 2;
+  uint64 cas = 3;
+}
+
+message TouchRequest {
+  bytes key = 1;
+  int64 exptime = 2;
+}
+
+message TouchResponse {
+  bool found = 1;
+}
+
+message FlushAllRequest {
+  int64 delay = 1;
+}
+
+message FlushAllResponse {}
+
+message StatsRequest {}
+
+message StatsResponse {
+  map<string, string> stats = 1;
+}

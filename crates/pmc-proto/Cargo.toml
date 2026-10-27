@@ -1,0 +1,13 @@
+[package]
+name = "pmc-proto"
+description = "memcached text protocol (classic + meta) parser and encoder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+base64.workspace = true
+bytes.workspace = true
+memchr.workspace = true
+pmc-store.workspace = true

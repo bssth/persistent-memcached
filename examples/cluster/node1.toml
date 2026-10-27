@@ -1,0 +1,39 @@
+# Local 3-node cluster: 6 shards, each replicated on 3 nodes.
+# Start all three with scripts/cluster.sh, or by hand:
+#   pmcd -c examples/cluster/node1.toml
+#   pmcd -c examples/cluster/node1.toml --node-id 2 --listen 127.0.0.1:11221 --grpc 127.0.0.1:11222 --data-dir data/node2
+#   pmcd -c examples/cluster/node1.toml --node-id 3 --listen 127.0.0.1:11231 --grpc 127.0.0.1:11232 --data-dir data/node3
+
+node_id = 1
+data_dir = "data/node1"
+memcache_listen = "127.0.0.1:11211"
+grpc_listen = "127.0.0.1:11212"
+fsync = true
+read_consistency = "leader"
+
+[raft]
+heartbeat_ms = 100
+election_min_ms = 500
+election_max_ms = 1000
+snapshot_logs = 100000
+keep_logs = 5000
+
+[cluster]
+name = "local-dev"
+shards = 6
+replication = 3
+
+[[cluster.nodes]]
+id = 1
+grpc = "127.0.0.1:11212"
+memcache = "127.0.0.1:11211"
+
+[[cluster.nodes]]
+id = 2
+grpc = "127.0.0.1:11222"
+memcache = "127.0.0.1:11221"
+
+[[cluster.nodes]]
+id = 3
+grpc = "127.0.0.1:11232"
+memcache = "127.0.0.1:11231"

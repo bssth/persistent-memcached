@@ -1,0 +1,7 @@
+/target
+/data
+*.wal
+*.snap
+__pycache__/
+.pytest_cache/
+.idea

@@ -1,0 +1,62 @@
+name: Release
+
+# Push a tag `v<version>` (the version from Cargo.toml) to publish a GitHub release.
+# Tags with a suffix, like v0.2.0-rc.1, become pre-releases.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "pmcd") | .version')
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match the pmcd version ${version} in Cargo.toml"
+            exit 1
+          fi
+
+  # Tests, binaries, and the Docker image pushed to ghcr.io/<owner>/<repo>.
+  ci:
+    needs: version
+    uses: ./.github/workflows/ci.yml
+    with:
+      publish-image: true
+    permissions:
+      contents: read
+      packages: write
+
+  publish:
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: pmcd-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz | tee SHA256SUMS
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=()
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "pmcd ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --verify-tag \
+            "${flags[@]}"

@@ -1,0 +1,14 @@
+# Only Cargo files, crates/, proto/ and dist/ (prebuilt binaries) go into the image.
+.git
+.github
+.idea
+target
+data
+wiki
+tests
+scripts
+examples
+**/__pycache__
+**/.pytest_cache
+*.wal
+*.snap

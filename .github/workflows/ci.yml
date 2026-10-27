@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  # The release workflow runs this whole pipeline and publishes its archives.
+  workflow_call:
+    inputs:
+      publish-image:
+        description: Push the Docker image to ghcr.io
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Oldest glibc the Linux binaries must run on (CentOS 7 / Ubuntu 14.04 and newer).
+  GLIBC_VERSION: "2.17"
+
+jobs:
+  check:
+    name: fmt, clippy, tests
+    # A pull request from a branch of this repository is already checked by its push.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+
+  build:
+    name: build ${{ matrix.target }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+          rustup default stable
+
+      # zig is the cross linker: it targets any arch and an old glibc from one runner.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install cargo-zigbuild
+        run: pip install cargo-zigbuild==0.24.0 ziglang==0.17.0
+
+      # Release archives are built from scratch, without a cache.
+      - uses: Swatinem/rust-cache@v2
+        if: github.ref_type != 'tag'
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo zigbuild --release --locked -p pmcd --target "${{ matrix.target }}.${GLIBC_VERSION}"
+
+      - name: Package
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "pmcd") | .version')
+          name="pmcd-${version}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          cp "target/${{ matrix.target }}/release/pmcd" README.md "dist/${name}/"
+          cp -r examples "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pmcd-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+
+  # Packs the binaries from `build` into a multi-arch image (Dockerfile target `prebuilt`).
+  # Only checks that the image builds, unless the release workflow asks to publish it.
+  docker:
+    name: docker image
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: pmcd-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Lay out binaries as dist/linux/<arch>/pmcd
+        run: |
+          for pair in x86_64-unknown-linux-gnu:amd64 aarch64-unknown-linux-gnu:arm64; do
+            target=${pair%%:*} arch=${pair##*:}
+            mkdir -p "dist/linux/${arch}"
+            tar -xzf artifacts/pmcd-*-"${target}".tar.gz -C "dist/linux/${arch}" --strip-components=1 --wildcards '*/pmcd'
+          done
+          ls -l dist/linux/*/pmcd
+
+      - name: Build image
+        env:
+          PUBLISH: ${{ inputs.publish-image }}
+          TOKEN: ${{ github.token }}
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "pmcd") | .version')
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          args=(
+            --target prebuilt
+            --platform linux/amd64,linux/arm64
+            --tag "${image}:${version}"
+            --label "org.opencontainers.image.version=${version}"
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}"
+            --annotation "index:org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}"
+            --annotation "index:org.opencontainers.image.description=Persistent, replicated, sharded memcached-compatible server"
+          )
+          # Pre-releases (versions with a suffix) do not move `latest`.
+          if [[ "${version}" != *-* ]]; then args+=(--tag "${image}:latest"); fi
+
+          if [[ "${PUBLISH}" == "true" ]]; then
+            echo "${TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+            args+=(--push)
+          fi
+
+          # The default `docker` driver cannot build several platforms at once.
+          docker buildx create --use --driver docker-container
+          docker buildx build "${args[@]}" .

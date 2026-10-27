@@ -1,0 +1,20 @@
+[package]
+name = "pmc-store"
+description = "Deterministic memcached state machine, segmented WAL and snapshots"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bytes.workspace = true
+crc32c.workspace = true
+hashbrown.workspace = true
+parking_lot.workspace = true
+postcard.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

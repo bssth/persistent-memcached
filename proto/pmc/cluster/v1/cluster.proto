@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+// Internal node-to-node API. Payloads are postcard-encoded Rust types; this service is not
+// meant for clients.
+package pmc.cluster.v1;
+
+service Cluster {
+  // Raft RPC for one shard's group.
+  rpc Raft(RaftRequest) returns (RaftReply);
+  // A shard operation forwarded to the node that can execute it (usually the leader).
+  rpc Execute(ExecuteRequest) returns (ExecuteReply);
+  // Topology and per-shard Raft state as JSON, for operators.
+  rpc Status(StatusRequest) returns (StatusReply);
+}
+
+enum RaftKind {
+  APPEND = 0;
+  VOTE = 1;
+  SNAPSHOT = 2;
+}
+
+message RaftRequest {
+  uint32 shard = 1;
+  RaftKind kind = 2;
+  bytes payload = 3;
+  // Hash of the topology; nodes reject traffic from a differently configured cluster.
+  uint64 cluster_id = 4;
+}
+
+message RaftReply {
+  bytes payload = 1;
+}
+
+message ExecuteRequest {
+  uint32 shard = 1;
+  bytes payload = 2;
+  // Number of forwards so far; bounds forwarding loops during leader changes.
+  uint32 hops = 3;
+  uint64 cluster_id = 4;
+}
+
+message ExecuteReply {
+  bytes payload = 1;
+}
+
+message StatusRequest {}
+
+message StatusReply {
+  string json = 1;
+}
