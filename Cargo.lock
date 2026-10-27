@@ -1089,7 +1089,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pmc-proto"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "pmc-store"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "bytes",
  "crc32c",
@@ -1114,7 +1114,7 @@ dependencies = [
 
 [[package]]
 name = "pmcd"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "bytes",
