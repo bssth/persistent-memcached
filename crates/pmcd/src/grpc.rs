@@ -130,7 +130,7 @@ impl Memcache for MemcacheService {
             invalidate: false,
         };
         let (status, cas) = match self.ctx.router.write(op).await.map_err(status_of)? {
-            Reply::Stored { cas } => (pb::StoreStatus::Stored, cas),
+            Reply::Stored { cas, .. } => (pb::StoreStatus::Stored, cas),
             Reply::NotStored => (pb::StoreStatus::NotStored, 0),
             Reply::Exists => (pb::StoreStatus::Exists, 0),
             Reply::NotFound => (pb::StoreStatus::NotFound, 0),
@@ -198,7 +198,8 @@ impl ClusterService {
             Ok(())
         } else {
             Err(Status::failed_precondition(format!(
-                "request from a different cluster ({id:016x}, this node is in {:016x}); check cluster.nodes",
+                "request from a different cluster ({id:016x}, this node is in {:016x}); \
+                 check that [cluster] and max_item_size are the same on all nodes",
                 self.router.topo.cluster_id
             )))
         }

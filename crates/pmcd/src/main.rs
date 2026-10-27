@@ -27,7 +27,7 @@ use crate::cluster::Topology;
 use crate::config::Config;
 use crate::raft::network::{MAX_MESSAGE, Peers};
 use crate::router::Router;
-use crate::shard::Shard;
+use crate::shard::{MemoryBudget, Shard};
 
 pub mod pb {
     pub mod v1 {
@@ -94,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run(cfg: Config) -> anyhow::Result<()> {
-    let topo = Arc::new(Topology::from_config(&cfg.cluster));
+    let topo = Arc::new(Topology::from_config(&cfg.cluster, cfg.max_item_size));
     let peers = Arc::new(Peers::default());
     let router = Arc::new(Router::new(cfg.node_id, topo.clone(), peers.clone(), cfg.read_consistency));
     let ctx = Arc::new(mc::Ctx {
@@ -125,10 +125,12 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     let mut grpc_task = tokio::spawn(grpc);
 
     let mine: Vec<_> = topo.shards.iter().filter(|s| s.replicas.contains(&cfg.node_id)).collect();
-    let opened = join_all(
-        mine.iter().map(|s| Shard::open(s.id, &cfg, &s.replicas, &topo.nodes, topo.cluster_id, peers.clone())),
-    )
-    .await;
+    let memory = Arc::new(MemoryBudget::new((cfg.memory_limit_mb as usize) << 20));
+    let opened =
+        join_all(mine.iter().map(|s| {
+            Shard::open(s.id, &cfg, &s.replicas, &topo.nodes, topo.cluster_id, peers.clone(), memory.clone())
+        }))
+        .await;
     for s in opened {
         let s = s?;
         s.spawn_maintenance();

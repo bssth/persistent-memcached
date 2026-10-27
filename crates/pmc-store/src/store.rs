@@ -323,6 +323,7 @@ impl Store {
         if !self.fits(key.len(), value.len()) {
             return Reply::TooLarge;
         }
+        let size = value.len() as u64;
         match exptime {
             None => self.remove(&mut map, key),
             Some(exptime) => {
@@ -331,7 +332,7 @@ impl Store {
                 self.insert(&mut map, key, item, now);
             }
         }
-        Reply::Stored { cas: index }
+        Reply::Stored { cas: index, size }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -544,6 +545,9 @@ impl Store {
     }
 
     /// Copies all live items. Call between two `apply`s to get a consistent image.
+    ///
+    /// Items are copied with all their bits: the "win token handed out" bit is replicated
+    /// state, so a replica restored from a snapshot must not hand the token out again.
     pub fn image(&self) -> Image {
         let clocks = self.clocks();
         let mut items = Vec::with_capacity(self.count.load(Relaxed));
@@ -551,9 +555,7 @@ impl Store {
             let map = stripe.read();
             for (k, s) in map.iter() {
                 if self.alive(&s.item, clocks.apply_time) {
-                    let mut item = s.item.clone();
-                    item.bits &= !BIT_WON;
-                    items.push((k.clone(), item));
+                    items.push((k.clone(), s.item.clone()));
                 }
             }
         }
@@ -616,7 +618,7 @@ mod tests {
     #[test]
     fn set_get_cas_is_log_index() {
         let s = store();
-        assert_eq!(s.apply(5, &w(100, set("a", "1", 0))), Reply::Stored { cas: 5 });
+        assert_eq!(s.apply(5, &w(100, set("a", "1", 0))), Reply::Stored { cas: 5, size: 1 });
         let hit = s.get(b"a", 100, true).unwrap();
         assert_eq!(&hit.item.value[..], b"1");
         assert_eq!(hit.item.cas, 5);
@@ -642,7 +644,7 @@ mod tests {
             invalidate: false,
         };
         assert_eq!(s.apply(2, &w(105, add.clone())), Reply::NotStored);
-        assert_eq!(s.apply(3, &w(111, add)), Reply::Stored { cas: 3 });
+        assert_eq!(s.apply(3, &w(111, add)), Reply::Stored { cas: 3, size: 1 });
         // time never goes backwards even if a later entry carries an older timestamp
         s.apply(4, &w(50, Op::Tick));
         assert_eq!(s.apply_time(), 111);
@@ -652,7 +654,7 @@ mod tests {
     fn negative_exptime_deletes() {
         let s = store();
         s.apply(1, &w(100, set("a", "1", 0)));
-        assert_eq!(s.apply(2, &w(100, set("a", "2", -1))), Reply::Stored { cas: 2 });
+        assert_eq!(s.apply(2, &w(100, set("a", "2", -1))), Reply::Stored { cas: 2, size: 1 });
         assert!(s.get(b"a", 100, true).is_none());
         assert_eq!(s.stats().curr_items, 0);
     }
@@ -672,7 +674,7 @@ mod tests {
         assert_eq!(s.apply(1, &w(1, cas(1))), Reply::NotFound);
         s.apply(2, &w(1, set("k", "x", 0)));
         assert_eq!(s.apply(3, &w(1, cas(1))), Reply::Exists);
-        assert_eq!(s.apply(4, &w(1, cas(2))), Reply::Stored { cas: 4 });
+        assert_eq!(s.apply(4, &w(1, cas(2))), Reply::Stored { cas: 4, size: 1 });
     }
 
     #[test]
@@ -688,8 +690,9 @@ mod tests {
             cas: None,
             invalidate: false,
         };
-        s.apply(2, &w(1, op(StoreMode::Append, ">")));
-        s.apply(3, &w(1, op(StoreMode::Prepend, "<")));
+        // The reported size is that of the combined value (`ms s` after append/prepend).
+        assert_eq!(s.apply(2, &w(1, op(StoreMode::Append, ">"))), Reply::Stored { cas: 2, size: 4 });
+        assert_eq!(s.apply(3, &w(1, op(StoreMode::Prepend, "<"))), Reply::Stored { cas: 3, size: 5 });
         let it = s.get(b"k", 1, false).unwrap().item;
         assert_eq!(&it.value[..], b"<mid>");
         assert_eq!(it.flags, 7);
@@ -799,5 +802,37 @@ mod tests {
         }
         assert_eq!(t.applied_index(), 3);
         assert_eq!(&t.get(b"a", 0, false).unwrap().item.value[..], b"1");
+    }
+
+    /// A replica restored from a snapshot must answer the next `mg` exactly like a replica that
+    /// applied the whole log: the win token was already handed out, so it reports `Z`, not `W`.
+    #[test]
+    fn win_token_survives_snapshot() {
+        let s = store();
+        s.apply(1, &w(100, set("a", "1", 0)));
+        let inv = Op::Delete {
+            key: Bytes::from_static(b"a"),
+            cas: None,
+            invalidate: true,
+            exptime: Some(30),
+            remove_value: false,
+        };
+        s.apply(2, &w(100, inv));
+        let mg = Op::MetaGet { key: Bytes::from_static(b"a"), touch: None, vivify: None, recache: None };
+        assert!(matches!(s.apply(3, &w(100, mg.clone())), Reply::Item { won: true, .. }));
+        let viv = Op::MetaGet { key: Bytes::from_static(b"z"), touch: None, vivify: Some(30), recache: None };
+        assert!(matches!(s.apply(4, &w(100, viv.clone())), Reply::Item { won: true, .. }));
+
+        let restored = store();
+        let img = s.image();
+        restored.reset(img.clocks);
+        for (k, it) in img.items {
+            restored.load(k, it);
+        }
+        for (index, op) in [(5, mg), (6, viv)] {
+            let want = s.apply(index, &w(100, op.clone()));
+            assert!(matches!(want, Reply::Item { won: false, already_won: true, .. }), "{want:?}");
+            assert_eq!(restored.apply(index, &w(100, op)), want);
+        }
     }
 }

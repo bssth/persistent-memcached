@@ -48,6 +48,15 @@ CASES = {
     "meta-errors": [b"mg k zz\r\nmg k v v\r\nmg\r\nma k Q\r\n"],
     "meta-base64": [b"ms Zm9v 1 b\r\nx\r\nmg foo v\r\nmg Zm9v b k v\r\n"],
     "meta-stale-lease": [b"ms k 1 T0\r\nx\r\nmd k I T30\r\nmg k v\r\nmg k v\r\nmg lease N30 v\r\nmg lease N30 v\r\n"],
+    # ms reports only O k c s, in request order; f t h l are accepted and ignored.
+    "meta-set-return-flags": [b"ms k 5 s t f h l c k Oab F9 T100\r\nhello\r\nms k 2 t f\r\nhi\r\nmg k s f v\r\n"],
+    # s is the combined size after append/prepend, and the size sent when nothing was stored.
+    "meta-set-size": [
+        b"ms k 3 s\r\nmid\r\nms k 2 MA s c\r\n>>\r\nms k 1 MP s\r\n<\r\n",
+        b"ms nope 3 MA s c\r\nabc\r\nms nope 4 MR s\r\nabcd\r\nms k 2 C1 s c\r\nzz\r\nms gone 1 C5 s k\r\nx\r\n",
+    ],
+    "meta-set-quiet-flags": [b"ms k 1 q s c\r\nx\r\nms k 1 ME q s Oz\r\ny\r\nmn\r\n"],
+    "meta-set-base64-key": [b"ms Zm9v 3 b k s c\r\nbar\r\nmg foo s v\r\n"],
     "verbosity-version": [b"verbosity 1\r\n", b"verbosity\r\n"],
     "cas-wrong-arity": [b"cas k 0 0 1\r\nx\r\nversion\r\n"],
 }

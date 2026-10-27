@@ -62,13 +62,41 @@ pub enum ExecError {
     Internal(String),
 }
 
+/// The node-wide item memory limit (`memory_limit_mb`), shared by every shard replica on the
+/// node: what counts is the sum of their stores, followers included, since they all use this
+/// node's RAM.
+pub struct MemoryBudget {
+    /// Bytes; 0 means no limit.
+    limit: usize,
+    stores: parking_lot::RwLock<Vec<Arc<Store>>>,
+}
+
+impl MemoryBudget {
+    pub fn new(limit: usize) -> Self {
+        Self { limit, stores: Default::default() }
+    }
+
+    pub fn register(&self, store: Arc<Store>) {
+        self.stores.write().push(store);
+    }
+
+    pub fn used(&self) -> usize {
+        self.stores.read().iter().map(|s| s.used_bytes()).sum()
+    }
+
+    /// Whether writes that add data must be refused.
+    pub fn exhausted(&self) -> bool {
+        self.limit > 0 && self.used() > self.limit
+    }
+}
+
 pub struct Shard {
     pub id: u32,
     pub raft: Raft,
     pub store: Arc<Store>,
     pub log: LogStore,
     metrics: watch::Receiver<RaftMetrics<NodeId, NodeInfo>>,
-    memory_limit: usize,
+    memory: Arc<MemoryBudget>,
 }
 
 impl Shard {
@@ -79,9 +107,11 @@ impl Shard {
         nodes: &BTreeMap<NodeId, NodeInfo>,
         cluster_id: u64,
         peers: Arc<Peers>,
+        memory: Arc<MemoryBudget>,
     ) -> anyhow::Result<Arc<Self>> {
         let dir = cfg.data_dir.join(format!("shard-{id:05}"));
         let store = Arc::new(Store::new(StoreConfig { stripes: 256, max_item_size: cfg.max_item_size }));
+        memory.register(store.clone());
         let log = LogStore::open(&dir.join("log"), WalOptions { fsync: cfg.fsync, ..WalOptions::default() })?;
         let sm = StateMachine::open(&dir.join("snapshots"), store.clone())?;
         let raft_cfg = openraft::Config {
@@ -107,8 +137,7 @@ impl Shard {
             }
         }
         let metrics = raft.metrics();
-        let memory_limit = (cfg.memory_limit_mb as usize) << 20;
-        Ok(Arc::new(Self { id, raft, store, log, metrics, memory_limit }))
+        Ok(Arc::new(Self { id, raft, store, log, metrics, memory }))
     }
 
     pub fn is_leader(&self) -> bool {
@@ -144,7 +173,7 @@ impl Shard {
     }
 
     pub async fn write(&self, op: Op) -> Result<Reply, ExecError> {
-        if self.memory_limit > 0 && Self::grows(&op) && self.store.used_bytes() > self.memory_limit {
+        if Self::grows(&op) && self.memory.exhausted() {
             return Err(ExecError::OutOfMemory);
         }
         match self.raft.client_write(Write { now: unix_now(), op }).await {
@@ -223,4 +252,60 @@ impl Shard {
 
 pub fn unexpected(r: impl std::fmt::Debug) -> ExecError {
     ExecError::Internal(format!("unexpected result {r:?}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fill(store: &Store, index: u64, key: &str, bytes: usize) {
+        let op = Op::Store {
+            mode: pmc_store::StoreMode::Set,
+            key: Bytes::copy_from_slice(key.as_bytes()),
+            value: Bytes::from(vec![b'x'; bytes]),
+            flags: 0,
+            exptime: 0,
+            cas: None,
+            invalidate: false,
+        };
+        assert!(matches!(store.apply(index, &Write { now: 1, op }), Reply::Stored { .. }));
+    }
+
+    /// The limit covers the whole node: two shards, each under the limit on its own, together
+    /// exhaust it.
+    #[test]
+    fn memory_limit_is_per_node() {
+        let budget = MemoryBudget::new(100_000);
+        let a = Arc::new(Store::new(StoreConfig::default()));
+        let b = Arc::new(Store::new(StoreConfig::default()));
+        budget.register(a.clone());
+        budget.register(b.clone());
+
+        fill(&a, 1, "a", 60_000);
+        assert!(a.used_bytes() < 100_000);
+        assert!(!budget.exhausted());
+        fill(&b, 1, "b", 60_000);
+        assert!(b.used_bytes() < 100_000);
+        assert!(budget.exhausted(), "used {} of 100000", budget.used());
+
+        // Freeing memory in either shard lifts the limit again.
+        let del = Op::Delete {
+            key: Bytes::from_static(b"a"),
+            cas: None,
+            invalidate: false,
+            exptime: None,
+            remove_value: false,
+        };
+        a.apply(2, &Write { now: 1, op: del });
+        assert!(!budget.exhausted());
+    }
+
+    #[test]
+    fn zero_means_unlimited() {
+        let budget = MemoryBudget::new(0);
+        let a = Arc::new(Store::new(StoreConfig::default()));
+        budget.register(a.clone());
+        fill(&a, 1, "a", 200_000);
+        assert!(!budget.exhausted());
+    }
 }

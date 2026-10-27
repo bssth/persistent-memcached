@@ -295,11 +295,6 @@ async fn exec(ctx: &Ctx, req: Request, out: &mut BytesMut) {
     }
 }
 
-/// A view that only carries a CAS, for ms/md/ma statuses.
-fn cas_view(cas: u64) -> MetaView<'static> {
-    MetaView { cas, ttl: -1, ..MetaView::default() }
-}
-
 async fn meta_get(ctx: &Ctx, key: Bytes, opts: MetaOpts, out: &mut BytesMut) {
     let c = &ctx.stats.counters;
     inc(&c.cmd_meta);
@@ -320,6 +315,7 @@ async fn meta_get(ctx: &Ctx, key: Bytes, opts: MetaOpts, out: &mut BytesMut) {
             let now = unix_now();
             let view = MetaView {
                 value: &h.item.value,
+                size: h.item.value.len() as u64,
                 flags: h.item.flags,
                 cas: h.item.cas,
                 ttl: ttl_of(&h.item, now),
@@ -352,6 +348,8 @@ async fn meta_set(ctx: &Ctx, key: Bytes, value: Bytes, opts: MetaOpts, out: &mut
         _ => StoreMode::Set,
     };
     let flags = opts.client_flags.unwrap_or(0);
+    // `s` on a failed store reports the length of the value that was sent.
+    let sent = value.len() as u64;
     // `C` means nothing for add: the item must be missing anyway.
     let cas = if mode == StoreMode::Add { None } else { opts.cas };
     let op = Op::Store {
@@ -378,14 +376,14 @@ async fn meta_set(ctx: &Ctx, key: Bytes, value: Bytes, opts: MetaOpts, out: &mut
         res = ctx.router.write(add).await;
     }
     match res {
-        Ok(Reply::Stored { cas }) => {
+        Ok(Reply::Stored { cas, size }) => {
             if !opts.quiet {
-                encode::meta_status(out, b"HD", &opts, &key, Some(&cas_view(cas)));
+                encode::meta_set_status(out, b"HD", &opts, &key, cas, size);
             }
         }
-        Ok(Reply::NotStored) => encode::meta_status(out, b"NS", &opts, &key, Some(&cas_view(0))),
-        Ok(Reply::Exists) => encode::meta_status(out, b"EX", &opts, &key, Some(&cas_view(0))),
-        Ok(Reply::NotFound) => encode::meta_status(out, b"NF", &opts, &key, Some(&cas_view(0))),
+        Ok(Reply::NotStored) => encode::meta_set_status(out, b"NS", &opts, &key, 0, sent),
+        Ok(Reply::Exists) => encode::meta_set_status(out, b"EX", &opts, &key, 0, sent),
+        Ok(Reply::NotFound) => encode::meta_set_status(out, b"NF", &opts, &key, 0, sent),
         Ok(Reply::TooLarge) => {
             inc(&c.store_too_large);
             encode::line(out, b"SERVER_ERROR object too large for cache");
@@ -444,6 +442,7 @@ async fn meta_arith(ctx: &Ctx, key: Bytes, opts: MetaOpts, out: &mut BytesMut) {
             let digits = value.to_string();
             let view = MetaView {
                 value: digits.as_bytes(),
+                size: digits.len() as u64,
                 flags: item.flags,
                 cas: item.cas,
                 ttl: ttl_of(&item, unix_now()),

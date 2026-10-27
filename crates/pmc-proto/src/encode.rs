@@ -69,6 +69,8 @@ pub fn stat(out: &mut BytesMut, name: &str, value: impl std::fmt::Display) {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MetaView<'a> {
     pub value: &'a [u8],
+    /// Value length reported by `s`.
+    pub size: u64,
     pub flags: u32,
     pub cas: u64,
     /// Remaining TTL in seconds, -1 for "never expires".
@@ -80,48 +82,53 @@ pub struct MetaView<'a> {
     pub already_won: bool,
 }
 
+/// Writes one return flag (preceded by a space), if it applies.
+fn meta_flag(out: &mut BytesMut, f: u8, opts: &MetaOpts, key: &[u8], item: Option<&MetaView<'_>>) {
+    match (f, item) {
+        (b'O', _) => {
+            if let Some(o) = &opts.opaque {
+                out.extend_from_slice(b" O");
+                out.extend_from_slice(o);
+            }
+        }
+        (b'k', _) => {
+            out.extend_from_slice(b" k");
+            if opts.base64 {
+                out.extend_from_slice(base64::engine::general_purpose::STANDARD.encode(key).as_bytes());
+                out.extend_from_slice(b" b");
+            } else {
+                out.extend_from_slice(key);
+            }
+        }
+        (b'c', Some(it)) => {
+            out.extend_from_slice(b" c");
+            u64(out, it.cas);
+        }
+        (b'f', Some(it)) => {
+            out.extend_from_slice(b" f");
+            u64(out, it.flags as u64);
+        }
+        (b'h', Some(it)) => out.extend_from_slice(if it.fetched { b" h1" } else { b" h0" }),
+        (b'l', Some(it)) => {
+            out.extend_from_slice(b" l");
+            u64(out, it.last_access);
+        }
+        (b's', Some(it)) => {
+            out.extend_from_slice(b" s");
+            u64(out, it.size);
+        }
+        (b't', Some(it)) => {
+            out.extend_from_slice(b" t");
+            i64(out, it.ttl);
+        }
+        _ => {}
+    }
+}
+
 /// Writes the return flags requested in `opts` (each preceded by a space), then `Z X W`.
 pub fn meta_flags(out: &mut BytesMut, opts: &MetaOpts, key: &[u8], item: Option<&MetaView<'_>>) {
     for &f in &opts.ret {
-        match (f, item) {
-            (b'O', _) => {
-                if let Some(o) = &opts.opaque {
-                    out.extend_from_slice(b" O");
-                    out.extend_from_slice(o);
-                }
-            }
-            (b'k', _) => {
-                out.extend_from_slice(b" k");
-                if opts.base64 {
-                    out.extend_from_slice(base64::engine::general_purpose::STANDARD.encode(key).as_bytes());
-                    out.extend_from_slice(b" b");
-                } else {
-                    out.extend_from_slice(key);
-                }
-            }
-            (b'c', Some(it)) => {
-                out.extend_from_slice(b" c");
-                u64(out, it.cas);
-            }
-            (b'f', Some(it)) => {
-                out.extend_from_slice(b" f");
-                u64(out, it.flags as u64);
-            }
-            (b'h', Some(it)) => out.extend_from_slice(if it.fetched { b" h1" } else { b" h0" }),
-            (b'l', Some(it)) => {
-                out.extend_from_slice(b" l");
-                u64(out, it.last_access);
-            }
-            (b's', Some(it)) => {
-                out.extend_from_slice(b" s");
-                u64(out, it.value.len() as u64);
-            }
-            (b't', Some(it)) => {
-                out.extend_from_slice(b" t");
-                i64(out, it.ttl);
-            }
-            _ => {}
-        }
+        meta_flag(out, f, opts, key, item);
     }
     // memcached appends the lease flags in this order.
     if let Some(it) = item {
@@ -141,6 +148,22 @@ pub fn meta_flags(out: &mut BytesMut, opts: &MetaOpts, key: &[u8], item: Option<
 pub fn meta_status(out: &mut BytesMut, code: &[u8], opts: &MetaOpts, key: &[u8], item: Option<&MetaView<'_>>) {
     out.extend_from_slice(code);
     meta_flags(out, opts, key, item);
+    out.extend_from_slice(b"\r\n");
+}
+
+/// The status line of `ms`: `HD`, `NS`, `EX` or `NF`.
+///
+/// Like memcached, `ms` reports only `O`, `k`, `c` and `s`, in request order; the other return
+/// flags (`f`, `t`, `h`, `l`) are accepted and ignored. `size` is the length of the stored value
+/// (the combined one after append/prepend), or of the value sent when nothing was stored.
+pub fn meta_set_status(out: &mut BytesMut, code: &[u8], opts: &MetaOpts, key: &[u8], cas: u64, size: u64) {
+    let view = MetaView { cas, size, ..MetaView::default() };
+    out.extend_from_slice(code);
+    for &f in &opts.ret {
+        if matches!(f, b'O' | b'k' | b'c' | b's') {
+            meta_flag(out, f, opts, key, Some(&view));
+        }
+    }
     out.extend_from_slice(b"\r\n");
 }
 
@@ -176,5 +199,28 @@ mod tests {
         value(&mut b, b"k", 3, b"abc", Some(9));
         end(&mut b);
         assert_eq!(&b[..], b"VALUE k 3 3 9\r\nabc\r\nEND\r\n");
+    }
+
+    fn ms_opts(flags: &str) -> MetaOpts {
+        let mut buf = BytesMut::from(format!("ms k 1 {flags}\r\nx\r\n").as_bytes());
+        match crate::Parser::new(crate::Limits::default()).parse(&mut buf) {
+            Some(crate::Frame::Request(crate::Request::MetaSet { opts, .. })) => opts,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn meta_set_reports_only_o_k_c_s() {
+        let mut b = BytesMut::new();
+        meta_set_status(&mut b, b"HD", &ms_opts("s t f h l c k Oab F9 T100"), b"k", 42, 5);
+        assert_eq!(&b[..], b"HD s5 c42 kk Oab\r\n");
+
+        let mut b = BytesMut::new();
+        meta_set_status(&mut b, b"NS", &ms_opts("c s"), b"k", 0, 3);
+        assert_eq!(&b[..], b"NS c0 s3\r\n");
+
+        let mut b = BytesMut::new();
+        meta_set_status(&mut b, b"HD", &ms_opts("t f"), b"k", 7, 1);
+        assert_eq!(&b[..], b"HD\r\n");
     }
 }

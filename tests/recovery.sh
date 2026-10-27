@@ -4,7 +4,8 @@
 # snapshot building, log purging and loading from snapshot + log tail.
 #   tests/recovery.sh [path/to/pmcd]
 set -euo pipefail
-BIN=${1:-${CARGO_TARGET_DIR:-$HOME/.cache/pmcd-target}/debug/pmcd}
+BIN=${1:-$(bash "$(dirname "$0")/../scripts/target-dir.sh")/debug/pmcd}
+[[ -x "$BIN" ]] || { echo "no pmcd binary at $BIN; build it first: scripts/cargo.sh build" >&2; exit 1; }
 DIR=${PMCD_TEST_DIR:-/dev/shm/pmcd-recovery}
 PORT=${PMCD_TEST_PORT:-11411}
 rm -rf "$DIR" && mkdir -p "$DIR"

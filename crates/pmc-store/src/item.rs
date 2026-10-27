@@ -118,6 +118,8 @@ pub struct Write {
 pub enum Reply {
     Stored {
         cas: u64,
+        /// Length of the stored value: after append/prepend, of the combined value (`ms s`).
+        size: u64,
     },
     NotStored,
     /// CAS mismatch.

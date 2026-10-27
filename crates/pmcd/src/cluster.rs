@@ -93,7 +93,10 @@ pub struct Topology {
 impl Topology {
     /// Static placement: shard `s` lives on `replication` consecutive nodes starting at `s`,
     /// and owns a contiguous slot range.
-    pub fn from_config(cfg: &ClusterConfig) -> Self {
+    ///
+    /// `max_item_size` goes into `cluster_id` too: applying a log entry checks the item size,
+    /// so nodes with different limits would apply the same entry differently.
+    pub fn from_config(cfg: &ClusterConfig, max_item_size: usize) -> Self {
         let nodes: BTreeMap<u64, NodeInfo> =
             cfg.nodes.iter().map(|n| (n.id, NodeInfo { grpc: n.grpc.clone(), memcache: n.memcache.clone() })).collect();
         let ids: Vec<u64> = nodes.keys().copied().collect();
@@ -114,6 +117,7 @@ impl Topology {
         id.write(cfg.name.as_bytes());
         id.write(&cfg.shards.to_le_bytes());
         id.write(&(cfg.replication as u64).to_le_bytes());
+        id.write(&(max_item_size as u64).to_le_bytes());
         for (nid, info) in &nodes {
             id.write(&nid.to_le_bytes());
             id.write(info.grpc.as_bytes());
@@ -157,7 +161,7 @@ mod tests {
             replication: 3,
             nodes: (1..=4).map(|id| NodeConfig { id, grpc: format!("n{id}"), memcache: String::new() }).collect(),
         };
-        let t = Topology::from_config(&cfg);
+        let t = Topology::from_config(&cfg, 1 << 20);
         assert_eq!(t.shards[0].replicas, vec![1, 2, 3]);
         assert_eq!(t.shards[3].replicas, vec![4, 1, 2]);
         assert_eq!(t.shards[0].slots, (0, 4095));
@@ -165,7 +169,23 @@ mod tests {
         assert_eq!(t.shard_of(b"foo"), 2);
         let mut other = cfg.clone();
         other.nodes[0].grpc = "elsewhere".into();
-        assert_ne!(t.cluster_id, Topology::from_config(&other).cluster_id);
-        assert_eq!(t.cluster_id, Topology::from_config(&cfg).cluster_id);
+        assert_ne!(t.cluster_id, Topology::from_config(&other, 1 << 20).cluster_id);
+        assert_eq!(t.cluster_id, Topology::from_config(&cfg, 1 << 20).cluster_id);
+    }
+
+    /// Nodes with different item size limits must not form one cluster: the limit changes how
+    /// a log entry is applied.
+    #[test]
+    fn max_item_size_is_part_of_cluster_id() {
+        let cfg = ClusterConfig {
+            name: "pmcd".into(),
+            shards: 2,
+            replication: 3,
+            nodes: (1..=3).map(|id| NodeConfig { id, grpc: format!("n{id}"), memcache: String::new() }).collect(),
+        };
+        let a = Topology::from_config(&cfg, 1 << 20);
+        let b = Topology::from_config(&cfg, 2 << 20);
+        assert_ne!(a.cluster_id, b.cluster_id);
+        assert_eq!(a.shards[0].replicas, b.shards[0].replicas);
     }
 }
